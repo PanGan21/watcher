@@ -1,4 +1,4 @@
-package main
+package watcher
 
 import (
 	"context"
@@ -17,82 +17,58 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	defaultTarget  = "./"
-	defaultPattern = "**"
-	waitForTerm    = 5 * time.Second
-)
+const waitForTerm = 5 * time.Second
 
-var (
-	targets   []string
-	patterns  []string
-	ignores   []string
-	delay     time.Duration
-	restart   bool
-	sigopt    string
-	filteropt []string
-	verbose   bool
-)
+var verbose bool
 
-func main() {
-	var rootCmd = &cobra.Command{
-		Use:   "watcher [COMMAND]",
-		Short: "A file watching and command restarting tool",
-		Long:  `Run the COMMAND and restart when a file matching the pattern has been modified.`,
-		Args:  cobra.MinimumNArgs(1),
-		Run:   execute,
-	}
-
-	rootCmd.PersistentFlags().StringArrayVarP(&targets, "target", "t", []string{defaultTarget}, "observation target `path` (default \"./\")")
-	rootCmd.PersistentFlags().StringArrayVarP(&patterns, "pattern", "p", []string{defaultPattern}, "trigger pathname `glob` pattern (default \"**\")")
-	rootCmd.PersistentFlags().StringArrayVarP(&ignores, "ignore", "i", nil, "ignore pathname `glob` pattern")
-	rootCmd.PersistentFlags().DurationVarP(&delay, "delay", "d", time.Second, "`duration` to delay the restart of the command")
-	rootCmd.PersistentFlags().BoolVarP(&restart, "restart", "r", false, "restart the command on exit")
-	rootCmd.PersistentFlags().StringVarP(&sigopt, "signal", "s", "", "`signal` used to stop the command (default \"SIGTERM\")")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
-	rootCmd.PersistentFlags().StringArrayVarP(&filteropt, "filter", "f", nil, "filter file system `event` (CREATE|WRITE|REMOVE|RENAME|CHMOD)")
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+type WatcherOptions struct {
+	Targets   []string
+	Patterns  []string
+	Ignores   []string
+	Delay     time.Duration
+	Restart   bool
+	Sigopt    string
+	Filteropt []string
+	Verbose   bool
 }
 
-func execute(cmd *cobra.Command, args []string) {
-	parsedSignal, err := parseSignal(sigopt)
+func Execute(cmd *cobra.Command, args []string, options WatcherOptions) {
+	parsedSignal, err := parseSignal(options.Sigopt)
 	if err != nil {
 		log.Fatalf("[WATCHER] %v", err)
 	}
 
-	filters, err := parseFilters(filteropt)
+	filters, err := parseFilters(options.Filteropt)
 	if err != nil {
 		log.Fatalf("[WATCHER] %v", err)
 	}
 
-	watcherLog("verbose: %v", verbose)
-	watcherLog("targets:  %q", targets)
-	watcherLog("patterns: %q", patterns)
-	watcherLog("ignores:  %q", ignores)
+	watcherLog("verbose: %v", options.Verbose)
+	watcherLog("targets:  %q", options.Targets)
+	watcherLog("patterns: %q", options.Patterns)
+	watcherLog("ignores:  %q", options.Ignores)
 	watcherLog("filter:   %v", filters)
-	watcherLog("delay:    %v", delay)
+	watcherLog("delay:    %v", options.Delay)
 	watcherLog("signal:   %s", parsedSignal)
-	watcherLog("restart:  %v", restart)
+	watcherLog("restart:  %v", options.Restart)
 
-	modC, errC, err := watch(targets, patterns, ignores, filters)
+	verbose = options.Verbose
+
+	modificationChannel, errorChannel, err := watch(options.Targets, options.Patterns, options.Ignores, filters)
 	if err != nil {
 		log.Fatalf("[WATCHER] error: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	reload := runner(ctx, &wg, args, delay, parsedSignal.(syscall.Signal), restart)
+	reload := runner(ctx, &wg, args, options.Delay, parsedSignal.(syscall.Signal), options.Restart)
 
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case name, ok := <-modC:
+			case name, ok := <-modificationChannel:
 				if !ok {
 					cancel()
 					wg.Wait()
@@ -100,7 +76,7 @@ func execute(cmd *cobra.Command, args []string) {
 					return
 				}
 				reload <- name
-			case err := <-errC:
+			case err := <-errorChannel:
 				cancel()
 				wg.Wait()
 				log.Fatalf("[WATCHER] wacher error: %v", err)
@@ -127,17 +103,17 @@ func watch(targets, patterns, ignores []string, filters fsnotify.Op) (<-chan str
 		return nil, nil, err
 	}
 
-	modC := make(chan string)
-	errC := make(chan error)
+	modificationChannel := make(chan string)
+	errorChannel := make(chan error)
 	watchOp := ^filters
 
 	go func() {
-		defer close(modC)
+		defer close(modificationChannel)
 		for {
 			select {
 			case event, ok := <-w.Events:
 				if !ok {
-					errC <- fmt.Errorf("watcher.Events closed")
+					errorChannel <- fmt.Errorf("watcher.Events closed")
 					return
 				}
 
@@ -145,7 +121,7 @@ func watch(targets, patterns, ignores []string, filters fsnotify.Op) (<-chan str
 				watcherLog("event: %v %q", event.Op, name)
 
 				if ignore, err := matchPatterns(name, ignores); err != nil {
-					errC <- fmt.Errorf("match ignores: %w", err)
+					errorChannel <- fmt.Errorf("match ignores: %w", err)
 					return
 				} else if ignore {
 					continue
@@ -153,10 +129,10 @@ func watch(targets, patterns, ignores []string, filters fsnotify.Op) (<-chan str
 
 				if event.Has(watchOp) {
 					if match, err := matchPatterns(name, patterns); err != nil {
-						errC <- fmt.Errorf("match patterns: %w", err)
+						errorChannel <- fmt.Errorf("match patterns: %w", err)
 						return
 					} else if match {
-						modC <- name
+						modificationChannel <- name
 					}
 				}
 
@@ -167,22 +143,22 @@ func watch(targets, patterns, ignores []string, filters fsnotify.Op) (<-chan str
 						// ignore stat errors (notfound, permission, etc.)
 						log.Printf("[WATCHER] watcher: %v", err)
 					} else if fi.IsDir() {
-						err := addDirRecursive(w, name, patterns, ignores, modC)
+						err := addDirRecursive(w, name, patterns, ignores, modificationChannel)
 						if err != nil {
-							errC <- err
+							errorChannel <- err
 							return
 						}
 					}
 				}
 
 			case err, ok := <-w.Errors:
-				errC <- fmt.Errorf("watcher.Errors (%v): %w", ok, err)
+				errorChannel <- fmt.Errorf("watcher.Errors (%v): %w", ok, err)
 				return
 			}
 		}
 	}()
 
-	return modC, errC, nil
+	return modificationChannel, errorChannel, nil
 }
 
 func runner(ctx context.Context, wg *sync.WaitGroup, cmd []string, delay time.Duration, sig syscall.Signal, autorestart bool) chan<- string {
