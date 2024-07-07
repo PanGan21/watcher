@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -168,7 +167,7 @@ func watch(targets, patterns, ignores []string, filters fsnotify.Op) (<-chan str
 						// ignore stat errors (notfound, permission, etc.)
 						log.Printf("[WATCHER] watcher: %v", err)
 					} else if fi.IsDir() {
-						err := addDirRecursive(w, fi, name, patterns, ignores, modC)
+						err := addDirRecursive(w, name, patterns, ignores, modC)
 						if err != nil {
 							errC <- err
 							return
@@ -330,7 +329,7 @@ func addTargets(w *fsnotify.Watcher, targets, patterns, ignores []string) error 
 			return fmt.Errorf("stat: %w", err)
 		}
 		if fi.IsDir() {
-			if err := addDirRecursive(w, fi, t, patterns, ignores, nil); err != nil {
+			if err := addDirRecursive(w, t, patterns, ignores, nil); err != nil {
 				return err
 			}
 		}
@@ -342,7 +341,7 @@ func addTargets(w *fsnotify.Watcher, targets, patterns, ignores []string) error 
 	return nil
 }
 
-func addDirRecursive(w *fsnotify.Watcher, fi fs.FileInfo, t string, patterns, ignores []string, ch chan<- string) error {
+func addDirRecursive(w *fsnotify.Watcher, t string, patterns, ignores []string, ch chan<- string) error {
 	watcherLog("watching target: %q", t)
 	err := w.Add(t)
 	if err != nil {
@@ -367,11 +366,7 @@ func addDirRecursive(w *fsnotify.Watcher, fi fs.FileInfo, t string, patterns, ig
 			}
 		}
 		if de.IsDir() {
-			fi, err := de.Info()
-			if err != nil {
-				return err
-			}
-			err = addDirRecursive(w, fi, name, patterns, ignores, ch)
+			err = addDirRecursive(w, name, patterns, ignores, ch)
 			if err != nil {
 				return err
 			}
