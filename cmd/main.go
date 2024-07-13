@@ -15,17 +15,6 @@ const (
 	waitForTerm    = 5 * time.Second
 )
 
-// var (
-// 	targets   []string
-// 	patterns  []string
-// 	ignores   []string
-// 	delay     time.Duration
-// 	restart   bool
-// 	sigopt    string
-// 	filteropt []string
-// 	verbose   bool
-// )
-
 func main() {
 	var watcherOptions watcher.WatcherOptions
 
